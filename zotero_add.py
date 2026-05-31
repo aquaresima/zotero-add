@@ -26,6 +26,7 @@ import urllib.parse
 TRANSLATION_SERVER_DIR = "~/.local/opt/translation-server"
 TRANSLATION_SERVER = "http://localhost:1969"
 ZOTERO_BASE = "http://localhost:23119"
+DOCKER_IMAGE = "zotero-translation-server"
 API_VERSION = "3"
 CONNECTOR_HEADERS = {
     "Content-Type": "application/json",
@@ -53,17 +54,45 @@ def translation_server_running() -> bool:
     return True
 
 
+def _docker_available() -> bool:
+    try:
+        subprocess.run(["docker", "info"], capture_output=True, check=True)
+        return True
+    except Exception:
+        return False
+
+
 def start_translation_server() -> None:
-    import os, shlex
-    server_dir = os.path.expanduser(TRANSLATION_SERVER_DIR)
+    import os
     print("Starting translation server...")
-    subprocess.Popen(
-        ["node", "src/server.js"],
-        cwd=server_dir,
-        stdout=subprocess.DEVNULL,
-        stderr=subprocess.DEVNULL,
-        start_new_session=True,
-    )
+    if _docker_available():
+        # Check if container already exists (stopped)
+        result = subprocess.run(
+            ["docker", "ps", "-a", "--filter", "name=zotero-ts", "--format", "{{.Status}}"],
+            capture_output=True, text=True,
+        )
+        if "Exited" in result.stdout:
+            subprocess.Popen(["docker", "start", "zotero-ts"],
+                             stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        else:
+            subprocess.Popen(
+                ["docker", "run", "-d", "--name", "zotero-ts",
+                 "-p", "1969:1969", "--restart", "unless-stopped", DOCKER_IMAGE],
+                stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+            )
+    else:
+        server_dir = os.path.expanduser(TRANSLATION_SERVER_DIR)
+        if not os.path.isdir(server_dir):
+            print(f"Translation server not found at {server_dir}.", file=sys.stderr)
+            print("Run install.sh first.", file=sys.stderr)
+            sys.exit(1)
+        subprocess.Popen(
+            ["node", "src/server.js"],
+            cwd=server_dir,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            start_new_session=True,
+        )
     for _ in range(15):
         time.sleep(1)
         if translation_server_running():

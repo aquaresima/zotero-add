@@ -1,0 +1,23 @@
+diff --git a/src/webSession.js b/src/webSession.js
+index 47c50b0..f5671a2 100644
+--- a/src/webSession.js
++++ b/src/webSession.js
+@@ -274,7 +274,17 @@ WebSession.prototype.translate = async function (translate, translators) {
+ 	
+ 	var json = [];
+ 	for (let item of items) {
+-		json.push(...Zotero.Utilities.Item.itemToAPIJSON(item));
++		let converted = Zotero.Utilities.Item.itemToAPIJSON(item);
++		// Preserve attachment URLs (stripped by itemToAPIJSON)
++		if (item.attachments && item.attachments.length) {
++			converted[0].attachments = item.attachments.map(a => ({
++				title: a.title,
++				url: a.url,
++				mimeType: a.mimeType,
++				snapshot: a.snapshot !== undefined ? a.snapshot : false
++			})).filter(a => a.url);
++		}
++		json.push(...converted);
+ 	}
+ 	this.ctx.response.status = 200;
+ 	this.ctx.response.body = json;
