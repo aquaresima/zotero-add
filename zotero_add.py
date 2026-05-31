@@ -172,6 +172,62 @@ def resolve_collection(collection_arg: str) -> str | None:
         sys.exit(1)
 
 
+# ── auto-tag extraction ──────────────────────────────────────────────────────
+
+def fetch_tags_from_crossref(doi: str) -> list[str]:
+    url = f"https://api.crossref.org/works/{urllib.parse.quote(doi, safe='')}"
+    try:
+        req = urllib.request.Request(url, headers={"User-Agent": "zotero-add/1.0"})
+        data = json.loads(urllib.request.urlopen(req, timeout=10).read())
+        subjects = data.get("message", {}).get("subject", [])
+        return [s.lower() for s in subjects if s]
+    except Exception:
+        return []
+
+
+def fetch_tags_from_arxiv(arxiv_id: str) -> list[str]:
+    url = f"https://export.arxiv.org/abs/{arxiv_id}"
+    try:
+        req = urllib.request.Request(url, headers={"User-Agent": "zotero-add/1.0"})
+        html = urllib.request.urlopen(req, timeout=10).read().decode("utf-8", errors="replace")
+        # arXiv subjects are in <span class="primary-subject"> and <span class="secondary-subject">
+        tags = re.findall(r'class="[^"]*subject[^"]*"[^>]*>([^<(]+)', html)
+        return [t.strip().lower() for t in tags if t.strip()]
+    except Exception:
+        return []
+
+
+def extract_keywords_from_pdf_text(path: str) -> list[str]:
+    """Look for a Keywords: line in the first 64 KB of the PDF."""
+    with open(path, "rb") as f:
+        head = f.read(65536)
+    text = head.decode("latin-1")
+    m = re.search(r'[Kk]eywords?\s*[:\-—]\s*([^\n]{5,200})', text)
+    if not m:
+        return []
+    raw = m.group(1)
+    # Split on common delimiters: semicolons, commas, bullets
+    parts = re.split(r'[;,•·]', raw)
+    return [p.strip().lower() for p in parts if 3 < len(p.strip()) < 60]
+
+
+def auto_tags(doi: str = "", arxiv_id: str = "", pdf_path: str = "") -> list[str]:
+    tags: list[str] = []
+    if arxiv_id:
+        tags = fetch_tags_from_arxiv(arxiv_id)
+    if not tags and doi:
+        tags = fetch_tags_from_crossref(doi)
+    if not tags and pdf_path:
+        tags = extract_keywords_from_pdf_text(pdf_path)
+    seen: set[str] = set()
+    result = []
+    for t in tags:
+        if t not in seen:
+            seen.add(t)
+            result.append(t)
+    return result
+
+
 # ── translation ──────────────────────────────────────────────────────────────
 
 def translate(url: str) -> list:
@@ -206,29 +262,41 @@ def _fix_item_type(item: dict, url: str) -> None:
 
 # ── PDF import ───────────────────────────────────────────────────────────────
 
-DOI_RE = re.compile(r'\b(10\.\d{4,}/[^\s\]\[\"<>{|}\\^`\x00-\x1f]+)', re.ASCII)
+DOI_RE = re.compile(r'(?:doi[:/][\s]*)?(10\.\d{4,}/[^\s\]\[\"<>{|}\\^`\x00-\x1f]+)', re.ASCII | re.IGNORECASE)
 ARXIV_RE = re.compile(r'arxiv[.:/\s]+(\d{4}\.\d{4,5}(?:v\d+)?)', re.IGNORECASE)
 
 
 def extract_doi_from_pdf(path: str) -> str | None:
     """Scan raw PDF bytes for a DOI or arXiv ID. No external dependencies."""
     with open(path, "rb") as f:
-        # Read first 64 KB and last 32 KB — DOI is usually in header or footer
-        head = f.read(65536)
-        f.seek(max(0, os.path.getsize(path) - 32768))
-        tail = f.read(32768)
-    text = (head + tail).decode("latin-1")
+        content = f.read()
+    text = content.decode("latin-1")
 
-    # arXiv ID takes priority (more specific)
-    m = ARXIV_RE.search(text)
+    # 1. XMP dc:identifier — most reliable, paper's own DOI
+    m = re.search(r'<dc:identifier>\s*doi:(10\.\d{4,}/[^<\s]+)', text, re.IGNORECASE)
     if m:
-        arxiv_id = m.group(1).split("v")[0]  # strip version
-        return f"arxiv:{arxiv_id}"
+        return m.group(1).rstrip(".)>,;")
 
-    m = DOI_RE.search(text)
+    # 2. PDF /doi entry in document info dict
+    m = re.search(r'/doi\s*\(doi:(10\.\d{4,}/[^)]+)\)', text, re.IGNORECASE)
     if m:
-        doi = m.group(1).rstrip(".")
-        return doi
+        return m.group(1).rstrip(".)>,;")
+
+    # 3. arXiv XMP identifier
+    m = re.search(r'<dc:identifier>\s*arxiv[.:/\s]+(\d{4}\.\d{4,5})', text, re.IGNORECASE)
+    if m:
+        return f"arxiv:{m.group(1)}"
+
+    # 4. Scan first 128 KB for DOI (avoid false positives from references)
+    head = text[:131072]
+    m = DOI_RE.search(head)
+    if m:
+        return m.group(1).rstrip(".)>,;")
+
+    # 5. arXiv ID in header
+    m = ARXIV_RE.search(head)
+    if m:
+        return f"arxiv:{m.group(1).split('v')[0]}"
 
     return None
 
@@ -321,6 +389,9 @@ def save_item(item: dict, tags: list, target_id: str | None,
             print(f"PDF download failed: {e} — metadata only.", file=sys.stderr)
             return
 
+    # Give Zotero time to finish saving the parent item before attaching
+    time.sleep(2)
+
     metadata = json.dumps({
         "sessionID": session,
         "parentItemID": ITEM_ID,
@@ -349,9 +420,10 @@ def save_item(item: dict, tags: list, target_id: str | None,
 def main():
     parser = argparse.ArgumentParser(description="Add a paper (URL or PDF) to Zotero.")
     parser.add_argument("input", help="URL of the paper or path to a local PDF")
-    parser.add_argument("--tags", default="", help="Comma-separated tags")
+    parser.add_argument("--tags", default="", help="Comma-separated tags (auto-generated if omitted)")
     parser.add_argument("--collection", default="", help="Destination collection name (partial match OK)")
     parser.add_argument("--force", action="store_true", help="Skip duplicate check")
+    parser.add_argument("--no-auto-tags", action="store_true", help="Disable automatic tag extraction")
     args = parser.parse_args()
 
     tags = [t.strip() for t in args.tags.split(",") if t.strip()]
@@ -375,17 +447,21 @@ def main():
         identifier = extract_doi_from_pdf(pdf_path)
         if not identifier:
             print("No DOI or arXiv ID found in PDF — adding without metadata.", file=sys.stderr)
-            # Save bare item with PDF only
+            bare_title = os.path.splitext(os.path.basename(pdf_path))[0]
             item = {
                 "itemType": "journalArticle",
-                "title": os.path.splitext(os.path.basename(pdf_path))[0],
+                "title": bare_title,
                 "creators": [],
-                "tags": [],
+                "tags": [{"tag": "no DOI found", "type": 1}],
             }
+            tags = tags or []
+            if "no DOI found" not in tags:
+                tags = ["no DOI found"] + tags
             with open(pdf_path, "rb") as f:
                 pdf_bytes = f.read()
             save_item(item, tags, target_id, args.collection, session,
-                      pdf_bytes=pdf_bytes, pdf_meta={"title": os.path.basename(pdf_path), "url": ""})
+                      pdf_bytes=pdf_bytes,
+                      pdf_meta={"title": os.path.basename(pdf_path), "url": f"file://{pdf_path}"})
             return
 
         if identifier.startswith("arxiv:"):
@@ -424,13 +500,23 @@ def main():
                 print("Use --force to add anyway.")
                 sys.exit(0)
 
+        if not tags and not args.no_auto_tags:
+            arxiv_id_clean = arxiv_id if identifier.startswith("arxiv:") else ""
+            doi_clean = "" if identifier.startswith("arxiv:") else identifier
+            # Use tags from translated item first, then external sources
+            item_tags = [t["tag"] if isinstance(t, dict) else t for t in item.get("tags", [])]
+            tags = item_tags or auto_tags(doi=doi_clean, arxiv_id=arxiv_id_clean, pdf_path=pdf_path)
+            if tags:
+                print(f"Auto-tags: {tags}")
+
         with open(pdf_path, "rb") as f:
             pdf_bytes = f.read()
 
         # Strip remote attachments — we have the local PDF
         item.pop("attachments", None)
         save_item(item, tags, target_id, args.collection, session,
-                  pdf_bytes=pdf_bytes, pdf_meta={"title": os.path.basename(pdf_path), "url": ""})
+                  pdf_bytes=pdf_bytes,
+                  pdf_meta={"title": os.path.basename(pdf_path), "url": f"file://{pdf_path}"})
         return
 
     # ── URL path ──────────────────────────────────────────────────────────────
@@ -460,6 +546,15 @@ def main():
             print(f"\nDuplicate found: '{dup.get('title', '?')}' already in library.")
             print("Use --force to add anyway.")
             sys.exit(0)
+
+    if not tags and not args.no_auto_tags:
+        arxiv_m = re.search(r"arxiv\.org/abs/([\d.]+)", args.input)
+        tags = auto_tags(
+            doi=doi,
+            arxiv_id=arxiv_m.group(1) if arxiv_m else "",
+        )
+        if tags:
+            print(f"Auto-tags: {tags}")
 
     pdf_attach = next(
         (a for a in item.get("attachments", []) if "pdf" in a.get("mimeType", "")), None
