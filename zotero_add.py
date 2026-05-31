@@ -159,7 +159,32 @@ def translate(url: str) -> list:
         data=url.encode(),
         headers={"Content-Type": "text/plain"},
     )
-    return json.loads(urllib.request.urlopen(req, timeout=30).read())
+    items = json.loads(urllib.request.urlopen(req, timeout=30).read())
+    for item in items:
+        _fix_item_type(item, url)
+    return items
+
+
+def _fix_item_type(item: dict, url: str) -> None:
+    """Remap generic 'webpage' to a proper item type when the source is known."""
+    if item.get("itemType") != "webpage":
+        return
+    import re
+    # arXiv → preprint
+    m = re.search(r"arxiv\.org/abs/([\d.]+)", url)
+    if m:
+        item["itemType"] = "preprint"
+        item["repository"] = "arXiv"
+        item["archiveID"] = f"arXiv:{m.group(1)}"
+        item.pop("websiteTitle", None)
+        item.pop("accessDate", None)
+        return
+    # bioRxiv / medRxiv → preprint
+    if re.search(r"(biorxiv|medrxiv)\.org", url):
+        item["itemType"] = "preprint"
+        item["repository"] = "bioRxiv" if "biorxiv" in url else "medRxiv"
+        item.pop("websiteTitle", None)
+        item.pop("accessDate", None)
 
 
 # ── main ─────────────────────────────────────────────────────────────────────
