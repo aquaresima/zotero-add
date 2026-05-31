@@ -54,7 +54,7 @@ Make sure `~/.local/bin` is in your `PATH`.
 ## Usage
 
 ```
-zotero-add <url> [options]
+zotero-add <url|file.pdf> [options]
 
 Options:
   --tags        Comma-separated tags to apply (e.g. "SNN,review")
@@ -65,17 +65,25 @@ Options:
 **Examples:**
 
 ```bash
-# Add a paper
+# Add from URL
 zotero-add https://arxiv.org/abs/2507.05505
 
 # Add with tags and collection
 zotero-add https://doi.org/10.1038/s41593-021-00947-w --tags "review,dendrites" --collection "Dendrites"
+
+# Add a local PDF — DOI/arXiv ID extracted automatically, metadata fetched
+zotero-add paper.pdf
+zotero-add paper.pdf --tags "SNN" --collection "Reading"
 
 # Force-add even if duplicate detected
 zotero-add https://arxiv.org/abs/2507.05505 --force
 ```
 
 The translation server starts automatically if not running. Zotero must already be open.
+
+### PDF import
+
+When given a local PDF file, `zotero-add` scans the first 64 KB and last 32 KB of the file for a DOI or arXiv ID (no external dependencies — pure regex on raw bytes). If found, it fetches full metadata from the DOI or arXiv page, then attaches the local PDF file. If no identifier is found, it adds the PDF with a bare metadata stub.
 
 ---
 
