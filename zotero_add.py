@@ -242,6 +242,16 @@ def translate(url: str) -> list:
     return items
 
 
+def translate_doi(doi: str) -> list:
+    """Use /search endpoint for DOI lookup — more reliable than /web with doi.org."""
+    req = urllib.request.Request(
+        f"{TRANSLATION_SERVER}/search",
+        data=doi.encode(),
+        headers={"Content-Type": "text/plain"},
+    )
+    return json.loads(urllib.request.urlopen(req, timeout=30).read())
+
+
 def _fix_item_type(item: dict, url: str) -> None:
     if item.get("itemType") != "webpage":
         return
@@ -466,18 +476,21 @@ def main():
 
         if identifier.startswith("arxiv:"):
             arxiv_id = identifier[6:]
-            lookup_url = f"https://arxiv.org/abs/{arxiv_id}"
             print(f"Found arXiv ID: {arxiv_id}")
+            print(f"Fetching metadata...")
+            try:
+                items = translate(f"https://arxiv.org/abs/{arxiv_id}")
+            except urllib.error.URLError as e:
+                print(f"Metadata lookup failed: {e}", file=sys.stderr)
+                sys.exit(1)
         else:
-            lookup_url = f"https://doi.org/{identifier}"
             print(f"Found DOI: {identifier}")
-
-        print(f"Fetching metadata from: {lookup_url}")
-        try:
-            items = translate(lookup_url)
-        except urllib.error.URLError as e:
-            print(f"Metadata lookup failed: {e}", file=sys.stderr)
-            sys.exit(1)
+            print(f"Fetching metadata...")
+            try:
+                items = translate_doi(identifier)
+            except urllib.error.URLError as e:
+                print(f"Metadata lookup failed: {e}", file=sys.stderr)
+                sys.exit(1)
 
         if not items:
             print("No metadata found — adding PDF without metadata.", file=sys.stderr)
@@ -501,7 +514,7 @@ def main():
                 sys.exit(0)
 
         if not tags and not args.no_auto_tags:
-            arxiv_id_clean = arxiv_id if identifier.startswith("arxiv:") else ""
+            arxiv_id_clean = identifier[6:] if identifier.startswith("arxiv:") else ""
             doi_clean = "" if identifier.startswith("arxiv:") else identifier
             # Use tags from translated item first, then external sources
             item_tags = [t["tag"] if isinstance(t, dict) else t for t in item.get("tags", [])]
